@@ -12,6 +12,32 @@ def int_to_ipv4_le(value: int) -> str:
     return socket.inet_ntoa(struct.pack("<I", value))
 
 
+def normalize_counter(entry):
+    if "value" in entry:
+        value = entry["value"]
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, list):
+            total = 0
+            for item in value:
+                if isinstance(item, int):
+                    total += item
+                elif isinstance(item, dict) and "value" in item:
+                    total += item["value"]
+            return total
+
+    if "values" in entry:
+        total = 0
+        for item in entry["values"]:
+            if isinstance(item, dict) and "value" in item:
+                total += item["value"]
+        return total
+
+    return None
+
+
 def run_bpftool(container: str, map_name: str) -> str:
     cmd = [
         "docker", "exec", container,
@@ -33,22 +59,26 @@ def extract_entries(bpftool_json):
     entries = []
 
     for item in bpftool_json:
-        if "key" in item and "value" in item:
-            entries.append({
-                "map_id": None,
-                "key": item["key"],
-                "value": item["value"],
-            })
+        if "key" in item:
+            total = normalize_counter(item)
+            if total is not None:
+                entries.append({
+                    "map_id": None,
+                    "key": item["key"],
+                    "value": total,
+                })
 
         elif "elements" in item:
             map_id = item.get("id", None)
             for element in item["elements"]:
-                if "key" in element and "value" in element:
-                    entries.append({
-                        "map_id": map_id,
-                        "key": element["key"],
-                        "value": element["value"],
-                    })
+                if "key" in element:
+                    total = normalize_counter(element)
+                    if total is not None:
+                        entries.append({
+                            "map_id": map_id,
+                            "key": element["key"],
+                            "value": total,
+                        })
 
     return entries
 
