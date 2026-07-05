@@ -1,168 +1,194 @@
-# E19 — Per-IP Bandwidth Monitor
+# E19 - Per-IP Bandwidth Monitor
 
-## Overview
+This lab implements the E19 Software Networks final project.
 
-This lab implements the E19 Software Networks final project: Per-IP Bandwidth Monitor using eBPF/XDP.
+The goal of the project is to monitor bandwidth usage per source IP address using an XDP/eBPF program.
 
-The XDP program is attached to a container interface and monitors incoming IPv4 packets. For each source IPv4 address, it accumulates the total number of bytes seen from that source.
-
-Current implemented level:
+## Implemented level
 
 - Basic: Accumulate bytes per source IPv4 address.
-- Intermediate: Not implemented.
+- Intermediate: Implemented using `BPF_MAP_TYPE_LRU_PERCPU_HASH`.
 - Advanced: Not implemented.
 
-IPv6 addresses are configured in the lab topology, but the current implementation monitors IPv4 traffic only.
+## Project idea
 
-## Architecture
+The XDP program is attached to the `eth1` interface of a Containerlab node.
 
-The lab uses two Linux containers connected with a point-to-point eth1 link:
+For every incoming IPv4 packet, the program:
 
-node1: 10.0.3.1/24, fc00:3::1/64
-node2: 10.0.3.2/24, fc00:3::2/64
+1. Parses the Ethernet header.
+2. Checks if the packet is IPv4.
+3. Parses the IPv4 header.
+4. Reads the source IPv4 address.
+5. Computes the packet length.
+6. Updates a BPF map where the key is the source IPv4 address and the value is the byte counter.
 
-Typical test setup:
+The program always returns `XDP_PASS`, so packets are only monitored and are not dropped.
 
-node2 -> node1 traffic
-XDP attached on node1:eth1
+## Intermediate implementation
 
-This monitors incoming traffic on node1 and counts bytes by source IPv4 address.
+The Intermediate version uses a per-CPU LRU hash map:
 
-## Files
+`BPF_MAP_TYPE_LRU_PERCPU_HASH`
 
-Main files:
+This means that each CPU keeps a separate byte counter for each source IPv4 address.
 
-- Dockerfile
-- e19-bandwidth-monitor-lab.clab.yml
-- deploy.sh
-- destroy.sh
-- configs/node1.cfg
-- configs/node2.cfg
-- bin/entrypoint.sh
-- src/Makefile
-- src/e19_bandwidth_monitor.bpf.c
-- tools/read_map.py
+This avoids updating one shared counter from multiple CPUs and removes the need for atomic byte updates in the XDP program.
 
-File roles:
+Example internal per-CPU counter layout:
 
-- src/e19_bandwidth_monitor.bpf.c: XDP/eBPF source code.
-- src/Makefile: builds the BPF object file.
-- tools/read_map.py: reads the BPF map and prints readable IPv4 addresses.
-- e19-bandwidth-monitor-lab.clab.yml: containerlab topology.
-- deploy.sh / destroy.sh: wrapper scripts for deploying and destroying the lab.
+`10.0.3.2 -> CPU0: 196 bytes, CPU1: 294 bytes, CPU2: 0 bytes, CPU3: 0 bytes`
 
-## BPF Map
-
-The program uses a BPF hash map named src_ip_bytes.
-
-Map structure:
-
-key   = source IPv4 address
-value = total bytes received from that source
+The userspace script `tools/read_map.py` reads the per-CPU values, sums them, and prints the total bytes per source IP.
 
 Example:
 
-10.0.3.2 -> 490 bytes
+`196 + 294 + 0 + 0 = 490 bytes`
+
+## Files
+
+- `src/e19_bandwidth_monitor.bpf.c`
+  - XDP/eBPF program.
+  - Parses IPv4 packets.
+  - Counts bytes per source IPv4 address.
+  - Uses `BPF_MAP_TYPE_LRU_PERCPU_HASH`.
+
+- `tools/read_map.py`
+  - Reads the BPF map using `bpftool`.
+  - Converts raw IPv4 keys into readable IPv4 addresses.
+  - Sums per-CPU values.
+  - Prints total bytes per source IP.
+
+- `e19-bandwidth-monitor-lab.clab.yml`
+  - Containerlab topology.
+  - Creates two Linux nodes connected through `eth1`.
+
+- `configs/node1.cfg`
+  - IP configuration for node1.
+
+- `configs/node2.cfg`
+  - IP configuration for node2.
+
+- `deploy.sh`
+  - Builds and deploys the Containerlab topology.
+
+- `destroy.sh`
+  - Destroys the Containerlab topology.
+
+## Topology
+
+The lab contains two Linux containers:
+
+- node1: `10.0.3.1/24`
+- node2: `10.0.3.2/24`
+
+They are connected directly through `eth1`.
+
+Traffic generated from node2 to node1 is monitored by attaching the XDP program to `node1:eth1`.
 
 ## Build
 
-From the lab source directory:
+From the lab directory:
 
-cd containerlab/e19-bandwidth-monitor-lab/src
-make
+`cd containerlab/e19-bandwidth-monitor-lab`
 
-This compiles:
+Build the eBPF object:
 
-e19_bandwidth_monitor.bpf.c -> e19_bandwidth_monitor.bpf.o
+`cd src`
 
-The generated files *.bpf.o and vmlinux.h are build artifacts and should not be committed.
+`make clean`
 
-## Deploy the Lab
+`make`
+
+`cd ..`
+
+The build creates:
+
+`src/e19_bandwidth_monitor.bpf.o`
+
+## Deploy the lab
 
 From the lab directory:
 
-cd containerlab/e19-bandwidth-monitor-lab
-./deploy.sh
+`./deploy.sh`
 
-This creates two containers:
+This creates the Containerlab topology and starts the two containers.
 
-clab-e19-bandwidth-monitor-lab-node1
-clab-e19-bandwidth-monitor-lab-node2
+## Attach the XDP program
 
-## Attach the XDP Program
+Attach the XDP program to `eth1` of node1:
 
-Attach the XDP program on node1:eth1:
+`docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'ip link set dev eth1 xdp obj /work/bpf/e19_bandwidth_monitor.bpf.o sec xdp'`
 
-docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'ip link set dev eth1 xdp obj /work/bpf/e19_bandwidth_monitor.bpf.o sec xdp'
+Check that the XDP program is attached:
 
-Verify that XDP is attached:
+`docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'bpftool net show dev eth1'`
 
-docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'bpftool net show dev eth1'
+Expected output should show an XDP program attached to `eth1`.
 
-Expected output includes an xdp section with a program ID.
+## Generate test traffic
 
-## Generate IPv4 Traffic
+Send ICMP traffic from node2 to node1:
 
-Send traffic from node2 to node1:
+`docker exec clab-e19-bandwidth-monitor-lab-node2 bash -c 'ping -c 5 10.0.3.1'`
 
-docker exec clab-e19-bandwidth-monitor-lab-node2 bash -c 'ping -c 5 10.0.3.1'
+This generates IPv4 packets with source IP `10.0.3.2`.
 
-The XDP program attached on node1:eth1 sees these incoming packets and updates the byte counter for source IP 10.0.3.2.
+## Read the bandwidth counters
 
-## Read the BPF Map
+Run:
 
-Raw map output with bpftool:
-
-docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'bpftool map dump name src_ip_bytes'
-
-The raw key is shown as an integer because IPv4 addresses are stored as __u32.
-
-For readable output, use the helper script:
-
-./tools/read_map.py
+`./tools/read_map.py`
 
 Example output:
 
-Map ID   Source IP        Bytes
---------------------------------
-67       10.0.3.2         490
+`Map ID   Source IP        Bytes`
 
-The script converts the raw integer key into dotted IPv4 format.
+`--------------------------------`
 
-## Optional: Monitor the Other Direction
+`-        10.0.3.2         490`
 
-The same XDP program can also be attached to node2:eth1:
+This means that node1 received 490 bytes from source IP `10.0.3.2`.
 
-docker exec clab-e19-bandwidth-monitor-lab-node2 bash -c 'ip link set dev eth1 xdp obj /work/bpf/e19_bandwidth_monitor.bpf.o sec xdp'
+## Raw BPF map output
 
-Then send traffic from node1 to node2:
+The raw per-CPU map output can be inspected with:
 
-docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'ping -c 5 10.0.3.2'
+`docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'bpftool map dump name src_ip_bytes'`
 
-Read counters from node2:
+Example raw output:
 
-./tools/read_map.py --container clab-e19-bandwidth-monitor-lab-node2
+`key: 10.0.3.2`
 
-## Detach XDP
+`CPU0: 196 bytes`
 
-Detach the XDP program from node1:eth1:
+`CPU1: 294 bytes`
 
-docker exec clab-e19-bandwidth-monitor-lab-node1 bash -c 'ip link set dev eth1 xdp off'
+`CPU2: 0 bytes`
 
-If XDP was also attached on node2:
+`CPU3: 0 bytes`
 
-docker exec clab-e19-bandwidth-monitor-lab-node2 bash -c 'ip link set dev eth1 xdp off'
+The userspace script sums these values and prints the total.
 
-## Destroy the Lab
+## Destroy the lab
 
-./destroy.sh
+From the lab directory:
 
-This removes the containers and containerlab runtime files for this lab.
+`./destroy.sh`
 
-## Notes
+This removes the Containerlab topology.
 
-- The implementation currently monitors IPv4 source addresses only.
-- IPv6 addresses are configured in the topology but are not counted by the current XDP program.
-- The program returns XDP_PASS, so packets are monitored but not dropped or modified.
-- The map is not pinned under /sys/fs/bpf; it is accessed by name using bpftool.
-- The current implementation corresponds to the Basic requirement of E19.
+## Limitations
+
+- The current implementation monitors IPv4 traffic only.
+- IPv6 addresses are configured in the lab but are not counted by the XDP program.
+- Advanced top-talker reporting and periodic counter reset are not implemented.
+
+## Branches
+
+- `multi-lab-structure`
+  - Basic implementation.
+
+- `e19-intermediate`
+  - Intermediate implementation using `BPF_MAP_TYPE_LRU_PERCPU_HASH`.
+
